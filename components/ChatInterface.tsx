@@ -9,12 +9,13 @@ import { Card } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import Link from "next/link";
 
-// Using a static ID for demo. In production, use authentication.
+// ⚠️ Ensure this matches the User ID you use in your n8n testing
 const USER_ID = "demo_user_123";
 
-
+// ⚠️ YOUR N8N URLS (Production URLs)
 const TEXT_WEBHOOK = "https://n8n.applyforge.cloud/webhook/chat/send";
 const AUDIO_WEBHOOK = "https://n8n.applyforge.cloud/webhook/chat/audio";
+const UPDATES_WEBHOOK = "https://n8n.applyforge.cloud/webhook/chat/updates";
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>(
@@ -25,15 +26,38 @@ export default function ChatInterface() {
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const lastMessageRef = useRef<string | null>(null); // To prevent duplicates
 
-  // POLLING: Check for new messages from the Queue every 2 seconds
+  // 🔄 POLLING EFFECT: Checks for proactive messages (Reminders)
   useEffect(() => {
-    const interval = setInterval(async () => {
-      // Note: We need a way to 'fetch' the answer.
-      // Since your workflow pushes to Redis, the frontend usually needs an API to 'pop' or 'read' that Redis key.
-      // For this assignment, we will simulate the "Wait" behavior by relying on the immediate HTTP response
-      // if your N8N workflow is set to "Respond to Webhook".
-    }, 3000);
+    const pollForUpdates = async () => {
+      try {
+        const response = await fetch(`${UPDATES_WEBHOOK}?userId=${USER_ID}`);
+        if (!response.ok) return;
+
+        const data = await response.json();
+
+        // If we got a valid message from the queue
+        if (data && data.output) {
+          const newMsg = data.output;
+
+          // Simple duplicate check: Don't add if it's identical to the very last message
+          // (This helps if the poll runs twice quickly)
+          if (lastMessageRef.current !== newMsg) {
+            setMessages((prev) => [...prev, { role: "ai", content: newMsg }]);
+            lastMessageRef.current = newMsg;
+          }
+        }
+      } catch (e) {
+        // Silently fail on network errors during polling to keep UI clean
+        console.log("Polling check skipped");
+      }
+    };
+
+    // Run every 3 seconds
+    const interval = setInterval(pollForUpdates, 3000);
+
+    // Cleanup on unmount
     return () => clearInterval(interval);
   }, []);
 
@@ -53,11 +77,14 @@ export default function ChatInterface() {
       });
 
       const data = await response.json();
-      // Assuming n8n returns { output: "AI Response" }
-      const aiResponse =
-        typeof data === "string" ? data : data.output || JSON.stringify(data);
 
-      setMessages((prev) => [...prev, { role: "ai", content: aiResponse }]);
+      // Handle the immediate response (if any)
+      const aiResponse = typeof data === "string" ? data : data.output;
+
+      if (aiResponse) {
+        setMessages((prev) => [...prev, { role: "ai", content: aiResponse }]);
+        lastMessageRef.current = aiResponse; // Track for dupe check
+      }
     } catch (error) {
       console.error("Error:", error);
       setMessages((prev) => [
@@ -116,7 +143,9 @@ export default function ChatInterface() {
       const data = await response.json();
       const aiResponse =
         typeof data === "string" ? data : data.output || "Audio processed";
+
       setMessages((prev) => [...prev, { role: "ai", content: aiResponse }]);
+      lastMessageRef.current = aiResponse;
     } catch (error) {
       console.error("Error uploading audio:", error);
     } finally {
@@ -144,20 +173,30 @@ export default function ChatInterface() {
                 msg.role === "user" ? "justify-end" : "justify-start"
               }`}
             >
-              <div
-                className={`p-3 rounded-lg max-w-[80%] ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-slate-100 text-slate-900"
-                }`}
-              >
-                {msg.content}
+              <div className="flex items-start gap-2 max-w-[80%]">
+                {msg.role === "ai" && (
+                  <Avatar className="w-8 h-8">
+                    <AvatarImage src="/bot-avatar.png" />
+                    <AvatarFallback>AI</AvatarFallback>
+                  </Avatar>
+                )}
+                <div
+                  className={`p-3 rounded-lg ${
+                    msg.role === "user"
+                      ? "bg-blue-600 text-white"
+                      : "bg-slate-100 text-slate-900"
+                  }`}
+                >
+                  {msg.content}
+                </div>
               </div>
             </div>
           ))}
           {isLoading && (
-            <div className="text-sm text-gray-500 animate-pulse">
-              AI is typing...
+            <div className="flex justify-start">
+              <div className="bg-slate-100 p-3 rounded-lg flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Thinking...
+              </div>
             </div>
           )}
         </div>

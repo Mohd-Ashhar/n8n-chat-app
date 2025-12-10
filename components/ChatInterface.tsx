@@ -18,17 +18,26 @@ const AUDIO_WEBHOOK = "https://n8n.applyforge.cloud/webhook/chat/audio";
 const UPDATES_WEBHOOK = "https://n8n.applyforge.cloud/webhook/chat/updates";
 
 export default function ChatInterface() {
-  const [messages, setMessages] = useState<{ role: string; content: string }[]>(
-    []
-  );
+  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  // isProcessing controls the "Thinking" bubble, but NOT the input field
+  const [isProcessing, setIsProcessing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const lastMessageRef = useRef<string | null>(null); // To prevent duplicates
 
-  // 🔄 POLLING EFFECT: Checks for proactive messages (Reminders)
+  // Helper to safely add messages without duplicates
+  const addAiMessage = (content: string) => {
+    if (!content) return;
+    if (lastMessageRef.current === content) return; // Prevent duplicates
+
+    setMessages((prev) => [...prev, { role: "ai", content }]);
+    lastMessageRef.current = content;
+    setIsProcessing(false); // Stop thinking animation
+  };
+
+  // 🔄 POLLING EFFECT: Checks for Reminders or Missed Answers
   useEffect(() => {
     const pollForUpdates = async () => {
       try {
@@ -36,28 +45,18 @@ export default function ChatInterface() {
         if (!response.ok) return;
 
         const data = await response.json();
-
-        // If we got a valid message from the queue
+        
+        // If the polling loop finds a message, add it
         if (data && data.output) {
-          const newMsg = data.output;
-
-          // Simple duplicate check: Don't add if it's identical to the very last message
-          // (This helps if the poll runs twice quickly)
-          if (lastMessageRef.current !== newMsg) {
-            setMessages((prev) => [...prev, { role: "ai", content: newMsg }]);
-            lastMessageRef.current = newMsg;
-          }
+          addAiMessage(data.output);
         }
       } catch (e) {
-        // Silently fail on network errors during polling to keep UI clean
-        console.log("Polling check skipped");
+        // Silently fail on network errors
       }
     };
 
-    // Run every 3 seconds
-    const interval = setInterval(pollForUpdates, 3000);
-
-    // Cleanup on unmount
+    // Run every 2 seconds
+    const interval = setInterval(pollForUpdates, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -67,32 +66,28 @@ export default function ChatInterface() {
     const userMsg = { role: "user", content: input };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
-    setIsLoading(true);
+    setIsProcessing(true); 
 
     try {
+      // 1. Send the message
       const response = await fetch(TEXT_WEBHOOK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: USER_ID, message: userMsg.content }),
       });
 
+      // 2. CHECK THE RESPONSE! (This was missing in the broken code)
+      // If the Ingestion workflow waits and returns the answer, we catch it here.
       const data = await response.json();
-
-      // Handle the immediate response (if any)
       const aiResponse = typeof data === "string" ? data : data.output;
 
       if (aiResponse) {
-        setMessages((prev) => [...prev, { role: "ai", content: aiResponse }]);
-        lastMessageRef.current = aiResponse; // Track for dupe check
+        addAiMessage(aiResponse);
       }
+      
     } catch (error) {
       console.error("Error:", error);
-      setMessages((prev) => [
-        ...prev,
-        { role: "ai", content: "Error connecting to AI agent." },
-      ]);
-    } finally {
-      setIsLoading(false);
+      // Don't stop processing here, the polling loop might still catch it later
     }
   };
 
@@ -108,9 +103,7 @@ export default function ChatInterface() {
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: "audio/wav",
-        });
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" });
         await sendAudio(audioBlob);
       };
 
@@ -129,7 +122,7 @@ export default function ChatInterface() {
   };
 
   const sendAudio = async (audioBlob: Blob) => {
-    setIsLoading(true);
+    setIsProcessing(true);
     const formData = new FormData();
     formData.append("file", audioBlob, "recording.wav");
     formData.append("userId", USER_ID);
@@ -140,16 +133,17 @@ export default function ChatInterface() {
         body: formData,
       });
 
+      // Also check immediate response for Audio
       const data = await response.json();
-      const aiResponse =
-        typeof data === "string" ? data : data.output || "Audio processed";
+      const aiResponse = typeof data === "string" ? data : data.output;
+      
+      if (aiResponse) {
+        addAiMessage(aiResponse);
+      }
 
-      setMessages((prev) => [...prev, { role: "ai", content: aiResponse }]);
-      lastMessageRef.current = aiResponse;
     } catch (error) {
       console.error("Error uploading audio:", error);
-    } finally {
-      setIsLoading(false);
+      setIsProcessing(false);
     }
   };
 
@@ -192,7 +186,7 @@ export default function ChatInterface() {
               </div>
             </div>
           ))}
-          {isLoading && (
+          {isProcessing && (
             <div className="flex justify-start">
               <div className="bg-slate-100 p-3 rounded-lg flex items-center gap-2">
                 <Loader2 className="w-4 h-4 animate-spin" /> Thinking...
@@ -208,20 +202,16 @@ export default function ChatInterface() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
           placeholder="Type a message..."
-          disabled={isLoading}
+          disabled={false}
         />
         <Button
           variant={isRecording ? "destructive" : "outline"}
           size="icon"
           onClick={isRecording ? stopRecording : startRecording}
         >
-          {isRecording ? (
-            <Square className="w-4 h-4" />
-          ) : (
-            <Mic className="w-4 h-4" />
-          )}
+          {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
         </Button>
-        <Button onClick={sendMessage} disabled={isLoading || !input}>
+        <Button onClick={sendMessage} disabled={!input}>
           <Send className="w-4 h-4" />
         </Button>
       </div>
